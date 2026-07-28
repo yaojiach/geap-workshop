@@ -330,6 +330,68 @@ python3 scripts/interact_adk_agent.py
 
 ---
 
+### Option D: Call the Agent Engine Agent Through a Gemini Enterprise App
+
+> **Business Goal**: Publish the agent to end users. Registering the reasoning engine as an
+> agent inside a **Gemini Enterprise** app puts it in the same chat surface as the rest of
+> the organisation's agents, and makes it reachable from the public Discovery Engine API
+> that the Gemini Enterprise web UI itself uses — no Vertex AI SDK required on the client.
+
+First register the deployed reasoning engine in your Gemini Enterprise app (Agents → Add
+agent → ADK agent → point it at `projects/.../reasoningEngines/YOUR_ENGINE_ID`). Then:
+
+```bash
+source venv/bin/activate
+export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
+
+# 1. Find your Gemini Enterprise app (engine) ID
+python3 scripts/ge_agent.py --list-apps
+export GE_ENGINE_ID="gemini-enterprise-xxxxxxxx_xxxxxxxxxxxxx"
+
+# 2. Find the agent ID your reasoning engine was registered under
+python3 scripts/ge_agent.py --list
+#   8420417736921100318  ENABLED  adkAgentDefinition  GEAP Warehouse Agent  -> reasoningEngine 8831015160773607424
+
+# 3. Talk to it
+export GE_AGENT_ID="8420417736921100318"
+python3 scripts/ge_agent.py "List all items in the warehouse inventory."
+
+# 4. Multi-turn: feed the returned session back in
+python3 scripts/ge_agent.py --session "projects/.../sessions/1080620116372672296" \
+    "Place an order for 5 Antigravity Boots (Product ID 3) for customer 'GE Test'."
+```
+
+#### What is Executed:
+* **Assistant Endpoint:** Posts to `{assistant}:streamAssist` on `discoveryengine.googleapis.com`.
+  The Gemini Enterprise web UI sends a large internal payload to this same endpoint
+  (`configId`, `experimentIdsForLogging`, `additionalParams`, ...); almost none of it is
+  required from an API client.
+* **Agent Routing:** `agentsSpec.agentSpecs[].agentId` is what routes the turn to a specific
+  agent. **Without it the default orchestrator answers the question itself** and never
+  reaches your agent — it will say it has no access to your warehouse database. The field is
+  accepted on `v1` (GA), `v1beta` and `v1alpha` alike.
+* **Sessions:** The first turn mints a session and returns it in `sessionInfo.session`.
+  Multi-turn is simply passing that resource name back as `session`. This is a Discovery
+  Engine session, separate from the Agent Engine managed sessions used by Option C.
+* **Tool Execution:** Unchanged — the reasoning engine still calls your Cloud Run MCP server,
+  which still talks to Cloud SQL. Gemini Enterprise is only the front door.
+
+#### Key Lines in Code:
+* **Routing to a specific agent (`scripts/ge_agent.py`):**
+  ```python
+  body = {"query": {"text": text}}
+  if agent_id:
+      body["agentsSpec"] = {"agentSpecs": [{"agentId": agent_id}]}
+  if session:
+      body["session"] = session
+  r = requests.post(f"{BASE}:streamAssist", headers=headers(), json=body, timeout=300)
+  ```
+
+> **Note:** the agents collection is only exposed on `v1alpha`, so `--list` uses that
+> version while the actual conversation uses `v1`.
+
+---
+
 ## 5. Deploy an Existing LangChain Agent on Agent Platform
 
 > **Business Goal**: Leverage the Agent Platform to deploy and run pre-existing LangChain agent workflows. This allows you to migrate legacy agent logic directly to production-grade managed infrastructure while preserving investments in existing LangChain orchestration code.

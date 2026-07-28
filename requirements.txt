@@ -8,6 +8,7 @@ sqlalchemy==2.0.51
 pg8000==1.31.5
 pyOpenSSL
 cloud-sql-python-connector[pg8000]
+requests
 # google-adk 2.x caps opentelemetry-api/sdk at <=1.42.1, so the instrumentation and
 # semantic-convention packages have to stay on the matching 0.63b1 line. Pinning them to
 # 0.64b0 makes pip resolve google-adk back down to 1.10.0, whose Runner does not accept the
