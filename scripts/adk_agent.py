@@ -153,18 +153,21 @@ def deploy_agent(project_id: str, location: str, mcp_url: str, staging_bucket: s
         reasoning_engine = agent_engines.create(
             agent_engine=adk_app_instance,
             requirements=[
-                "google-adk",
+                # Keep this list in sync with requirements.txt: google-adk 2.x caps
+                # opentelemetry-api/sdk at <=1.42.1, so the instrumentation packages must
+                # stay on the 0.63b1 line or pip resolves google-adk back down to 1.10.0.
+                "google-adk>=2.5.0",
                 "google-cloud-aiplatform",
                 "google-genai",
                 "mcp>=0.1.0",
                 "httpx>=0.20.0",
                 "anyio",
                 "pyjwt",
-                "opentelemetry-api",
-                "opentelemetry-sdk",
-                "opentelemetry-exporter-otlp-proto-http",
-                "opentelemetry-instrumentation==0.64b0",
-                "opentelemetry-semantic-conventions==0.64b0",
+                "opentelemetry-api==1.42.1",
+                "opentelemetry-sdk==1.42.1",
+                "opentelemetry-exporter-otlp-proto-http==1.42.1",
+                "opentelemetry-instrumentation==0.63b1",
+                "opentelemetry-semantic-conventions==0.63b1",
                 "opentelemetry-util-genai==0.3b0",
                 "opentelemetry-exporter-gcp-logging==1.12.0a0",
                 "opentelemetry-exporter-gcp-trace==1.12.0",

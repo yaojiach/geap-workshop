@@ -11,7 +11,10 @@ prefix = os.environ.get("GEAP_PREFIX")
 if not prefix:
     print("Error: GEAP_PREFIX environment variable is not set.")
     sys.exit(1)
-client = genai.Client(vertexai=True, project=os.environ["GOOGLE_CLOUD_PROJECT"], location="global", http_options={"timeout": 120.0})
+# http_options.timeout is in MILLISECONDS (the per-call `timeout=` argument below is in
+# seconds). The old value of 120.0 gave every request a 120 ms budget, so anything that did
+# not answer instantly failed with a client-side timeout.
+client = genai.Client(vertexai=True, project=os.environ["GOOGLE_CLOUD_PROJECT"], location="global", http_options={"timeout": 600_000})
 
 mcp_server_url = os.environ.get("MCP_SERVER_URL")
 if not mcp_server_url:
@@ -24,10 +27,21 @@ if mcp_server_url.endswith("/sse"):
 if not mcp_server_url.endswith("/mcp"):
     mcp_server_url = f"{mcp_server_url}/mcp"
 
+agent_id = f"{prefix}-warehouse-manager"
+
+# Re-running this script is common during the workshop, and agents.create() fails with
+# ALREADY_EXISTS rather than updating. Delete any previous agent of the same name first.
+try:
+    client.agents.delete(agent_id, timeout=120.0)
+    print(f"Deleted existing agent '{agent_id}'.")
+except Exception as e:
+    if "not found" not in str(e).lower() and "404" not in str(e):
+        print(f"Warning: could not delete existing agent '{agent_id}': {e}")
+
 print(f"Creating remote agent with MCP server at {mcp_server_url}...")
 
 operation = client.agents.create(
-    id=f"{prefix}-warehouse-manager",
+    id=agent_id,
     base_agent="antigravity-preview-05-2026",
     description="An AI assistant that can manage a warehouse inventory and create customer orders.",
     system_instruction=(
@@ -69,20 +83,27 @@ def get_operation_status(operation_name: str):
         return None
 
 import time
+CREATE_TIMEOUT_SECONDS = 600
 print("Waiting for creation to complete (this might take a few minutes)...")
+deadline = time.time() + CREATE_TIMEOUT_SECONDS
 while True:
+    if time.time() > deadline:
+        print(f"\nAgent creation did not finish within {CREATE_TIMEOUT_SECONDS}s.")
+        print(f"Check the operation manually: {operation.name}")
+        sys.exit(1)
+
     status = get_operation_status(operation.name)
     if not status:
         time.sleep(5)
         continue
-    
+
     if status.get("done"):
         if "error" in status:
             print(f"Agent creation failed: {json.dumps(status['error'], indent=2)}")
-        else:
-            print("Agent created successfully!")
-            print(json.dumps(status.get("response", {}), indent=2))
+            sys.exit(1)
+        print("Agent created successfully!")
+        print(json.dumps(status.get("response", {}), indent=2))
         break
-        
+
     print(".", end="", flush=True)
     time.sleep(5)

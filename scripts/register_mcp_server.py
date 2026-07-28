@@ -2,16 +2,41 @@ import os
 import re
 import sys
 import json
+import time
 import urllib.request
 import urllib.error
 import google.auth
 import google.auth.transport.requests
+
+# Deleting a registry service returns a long-running operation, so the entry stays visible
+# for a few seconds afterwards. Re-creating it too soon fails with HTTP 409 ALREADY_EXISTS.
+DELETE_POLL_TIMEOUT_SECONDS = 90
 
 def get_auth_token():
     credentials, _ = google.auth.default()
     auth_req = google.auth.transport.requests.Request()
     credentials.refresh(auth_req)
     return credentials.token
+
+def wait_until_deleted(service_url: str, token: str):
+    """Polls the service until it returns 404, so the follow-up create does not hit a 409."""
+    deadline = time.time() + DELETE_POLL_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        req = urllib.request.Request(service_url, method="GET")
+        req.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(req):
+                pass
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                print("Existing registry entry is fully deleted.")
+                return
+        except Exception:
+            return
+        print(".", end="", flush=True)
+        time.sleep(3)
+    print(f"\nWarning: registry entry still present after {DELETE_POLL_TIMEOUT_SECONDS}s; "
+          "continuing anyway.")
 
 def register_mcp_server(project_id: str, location: str, mcp_url: str):
     prefix = os.environ.get("GEAP_PREFIX")
@@ -30,7 +55,8 @@ def register_mcp_server(project_id: str, location: str, mcp_url: str):
     
     try:
         with urllib.request.urlopen(req) as response:
-            print("Deleted existing registry entry.")
+            print("Deletion requested; waiting for it to finish...", end="", flush=True)
+            wait_until_deleted(delete_url, token)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             print("No existing registry entry found.")
@@ -117,26 +143,34 @@ def register_mcp_server(project_id: str, location: str, mcp_url: str):
         ]
     }
 
-    req = urllib.request.Request(
-        create_url,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST"
-    )
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", "application/json")
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            resp_body = response.read().decode()
-            print("Successfully registered service in Agent Registry!")
-            print(json.dumps(json.loads(resp_body), indent=2))
-    except urllib.error.HTTPError as e:
-        print(f"\nError registering service (HTTP {e.code}): {e.reason}")
-        print(e.read().decode())
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nFailed to register service: {e}")
-        sys.exit(1)
+    for attempt in range(1, 4):
+        req = urllib.request.Request(
+            create_url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST"
+        )
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            with urllib.request.urlopen(req) as response:
+                resp_body = response.read().decode()
+                print("Successfully registered service in Agent Registry!")
+                print(json.dumps(json.loads(resp_body), indent=2))
+                return
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code == 409 and attempt < 3:
+                print(f"Registry still reports the service as existing (attempt {attempt}/3); "
+                      "retrying in 10s...")
+                time.sleep(10)
+                continue
+            print(f"\nError registering service (HTTP {e.code}): {e.reason}")
+            print(body)
+            sys.exit(1)
+        except Exception as e:
+            print(f"\nFailed to register service: {e}")
+            sys.exit(1)
 
 def main():
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")

@@ -88,6 +88,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **Note on the OpenTelemetry pins:** `google-adk` 2.x requires `opentelemetry-api/sdk <= 1.42.1`,
+> so the instrumentation and semantic-convention packages are pinned to the matching `0.63b1`
+> line. If you bump them to `0.64b0`, pip silently resolves `google-adk` back down to `1.10.0`,
+> and Section 4 Option C then fails locally with
+> `TypeError: Runner.__init__() got an unexpected keyword argument 'app'`.
+
 ---
 
 ## 2. Create Cloud SQL Database & Seed Inventory
@@ -150,9 +156,10 @@ pip install -r requirements.txt
    ```bash
    bash scripts/deploy_mcp_server.sh
    ```
-   Save the output `MCP_SERVER_URL` in your terminal:
+   Save the output `MCP_SERVER_URL` in your terminal. The FastMCP server speaks
+   **Streamable HTTP** and is mounted at `/mcp` (there is no `/sse` endpoint):
    ```bash
-   export MCP_SERVER_URL="https://${USER}-warehouse-mcp-server-xxxx-uc.a.run.app/sse"
+   export MCP_SERVER_URL="https://${GEAP_PREFIX}-warehouse-mcp-server-xxxx-uc.a.run.app/mcp"
    ```
 
 2. Register the deployed service in the Agent Registry:
@@ -194,14 +201,14 @@ Choose **Option A (Local Emulation - Recommended)** or **Option B (Cloud Managed
 In Local Emulation, you bypass cloud-provisioning completely. The **Local Agent Client** runs the conversational and function-calling loop directly on your workstation using the standard Gemini API (`gemini-3.5-flash`), loading tool specifications directly from your deployed Cloud Run MCP server. This is the recommended approach for rapid local development and testing before pushing an agent to production.
 
 ```bash
-export MCP_SERVER_URL="YOUR_CLOUD_RUN_SSE_URL"
+export MCP_SERVER_URL="YOUR_CLOUD_RUN_URL/mcp"
 python3 scripts/local_agent.py
 ```
 
 #### What is Executed:
 * **OAuth / OIDC Authentication:** Checks if the target `MCP_SERVER_URL` points to an authenticated `.run.app` service. If so, it requests a secure Google OIDC ID Token for the Cloud Run audience and attaches it as an `Authorization` header, bypassing corporate *Domain Restricted Sharing* restrictions.
 * **Tool Mapping:** Fetches the database tool schemas from the MCP server and maps them to standard Gemini `FunctionDeclaration` parameters.
-* **Stateful Chat Loop:** Initiates a text loop, passing prompts to Gemini and intercepting requested tool calls, calling the MCP server via SSE, and returning database results back to the model.
+* **Stateful Chat Loop:** Initiates a text loop, passing prompts to Gemini and intercepting requested tool calls, calling the MCP server over Streamable HTTP, and returning database results back to the model.
 
 #### Key Lines in Code:
 * **OIDC Secure Token Retrieval (`scripts/local_agent.py`):**
@@ -209,7 +216,7 @@ python3 scripts/local_agent.py
   import google.oauth2.id_token
   from google.auth.transport.requests import Request
 
-  audience = mcp_url.split("/sse")[0]
+  audience = mcp_url.split("/mcp")[0]
   token = google.oauth2.id_token.fetch_id_token(Request(), audience)
   headers["Authorization"] = f"Bearer {token}"
   ```
@@ -231,10 +238,23 @@ python3 scripts/local_agent.py
 You can also create a permanent cloud-managed agent hosted by Agent Engine. Because your Cloud Run MCP server is protected by Google Cloud IAM (Domain Restricted Sharing), the Agent Platform requires valid credentials to connect to it.
 
 ```bash
-export MCP_SERVER_URL="YOUR_CLOUD_RUN_SSE_URL"
+export MCP_SERVER_URL="YOUR_CLOUD_RUN_URL/mcp"
 python3 scripts/create_agent.py
 python3 scripts/interact_agent.py
 ```
+
+> **⚠️ Known limitation (preview):** the managed base agent currently answers plain prompts
+> in a few seconds, but interactions that need one of the registered `mcp_server` tools can
+> stay in `in_progress` indefinitely — no request ever reaches the Cloud Run service. This
+> reproduces with the `/mcp`, base and `/sse` URL forms alike and with or without an
+> injected `Authorization` header, so it is a platform-side issue rather than a
+> configuration error in this workshop. `verify_workshop.py --remote` therefore gives up
+> after `INTERACTION_TIMEOUT_SECONDS` (default 300) instead of hanging. Use **Option A** or
+> **Option C** if you need a working end-to-end tool-calling demo.
+>
+> Note also that `base_environment.network.allowlist` only accepts `{"domain": "*"}` today;
+> narrowing it to the Cloud Run hostname is rejected with
+> `400 INVALID_ARGUMENT: Only domain: '*' is supported now.`
 
 #### What is Executed:
 * **Token Retrieval & Injection:** Dynamically fetches a Google Identity token via `gcloud auth print-identity-token` and injects it into the `headers` field of the `mcp_server` tool definition. This allows Agent Engine to authenticate with the Cloud Run service.
@@ -275,7 +295,7 @@ You can verify the agent class structure entirely locally (which mocks the remot
 source venv/bin/activate
 export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
 export GEAP_PREFIX="your_name"
-export MCP_SERVER_URL="https://YOUR_CLOUD_RUN_SERVICE-uc.a.run.app/sse" # The Server-Sent Events endpoint
+export MCP_SERVER_URL="https://YOUR_CLOUD_RUN_SERVICE-uc.a.run.app/mcp" # The Streamable HTTP endpoint
 python3 scripts/adk_agent.py
 ```
 
@@ -285,10 +305,17 @@ To deploy the Python class as a remote Agent Engine instance:
 source venv/bin/activate
 export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
 export GEAP_PREFIX="your_name"
-export STAGING_BUCKET="gs://staging.YOUR_PROJECT_ID.appspot.com" # Staging bucket to upload pickle files
-export MCP_SERVER_URL="https://YOUR_CLOUD_RUN_SERVICE-uc.a.run.app/sse" # The Server-Sent Events endpoint
+export STAGING_BUCKET="gs://YOUR_PROJECT_ID-agent-engine-staging" # Staging bucket to upload pickle files
+export MCP_SERVER_URL="https://YOUR_CLOUD_RUN_SERVICE-uc.a.run.app/mcp" # The Streamable HTTP endpoint
 python3 scripts/adk_agent.py --deploy
 ```
+
+> **Create the staging bucket first** if you do not have one. Use a regular bucket -- the
+> legacy `gs://staging.PROJECT_ID.appspot.com` bucket is owned by App Engine and uploads to
+> it fail with `403 ... You must verify site or domain ownership`:
+> ```bash
+> gcloud storage buckets create "$STAGING_BUCKET" --location=us-central1
+> ```
 This will print the successfully deployed resource name (e.g. `projects/YOUR_PROJECT_NUMBER/locations/us-central1/reasoningEngines/YOUR_ENGINE_ID`).
 
 #### 3. How to Interact with the Deployed Remote Agent:
@@ -326,7 +353,7 @@ Deploy the compiled LangChain graph to the cloud under Agent Engine:
 source venv/bin/activate
 export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
 export GEAP_PREFIX="your_name"
-export STAGING_BUCKET="gs://staging.YOUR_PROJECT_ID.appspot.com"
+export STAGING_BUCKET="gs://YOUR_PROJECT_ID-agent-engine-staging"
 python3 scripts/langchain_agent.py --deploy
 ```
 This will output the remote resource name of your deployed LangChain agent:
@@ -354,7 +381,7 @@ Run the automated verification script to execute the five warehouse scenarios se
 
 To run verification in **Local Emulation** mode (Option A):
 ```bash
-export MCP_SERVER_URL="YOUR_CLOUD_RUN_SSE_URL"
+export MCP_SERVER_URL="YOUR_CLOUD_RUN_URL/mcp"
 python3 scripts/verify_workshop.py
 ```
 
@@ -362,6 +389,9 @@ To run verification using the **Cloud-Managed Agent** (Option B):
 ```bash
 python3 scripts/verify_workshop.py --remote
 ```
+This mode is subject to the managed-agent tool-calling limitation described in
+[Option B](#option-b-cloud-managed-agent) above; each interaction is abandoned after
+`INTERACTION_TIMEOUT_SECONDS` (default 300).
 
 To run verification using the **Reasoning Engine ADK Agent** (Option C):
 ```bash
@@ -441,7 +471,7 @@ Agent: Product: Antigravity Boots (ID: 3) | Current Stock: 0 units | Price: $899
 
 ### 1. View Sessions & Trajectories via API / CLI
 
-The Agent Development Kit (ADK) tracks multi-turn stateful conversations through session objects ([ADK Sessions Documentation](https://adk.dev/sessions/session/)). We provide a unified observation script [`scripts/observe_agent.py`](file:///usr/local/google/home/jush/geap-workshop/scripts/observe_agent.py) to inspect session state and turn trajectories across all agent modes.
+The Agent Development Kit (ADK) tracks multi-turn stateful conversations through session objects ([ADK Sessions Documentation](https://adk.dev/sessions/session/)). We provide a unified observation script [`scripts/observe_agent.py`](scripts/observe_agent.py) to inspect session state and turn trajectories across all agent modes.
 
 * **Option A (Local Agent Emulation):**
   Inspect locally recorded session trajectories:

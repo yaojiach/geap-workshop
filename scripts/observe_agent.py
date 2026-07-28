@@ -5,6 +5,36 @@ import glob
 import argparse
 from google import genai
 
+def print_trajectory(data: dict, title: str):
+    print("\n" + "="*60)
+    print(f"{title} (ID: {data.get('session_id')})")
+    print(f"Created At: {data.get('created_at')}")
+    print("="*60)
+
+    turns = data.get("turns", [])
+    print(f"Total Turns: {len(turns)}")
+
+    for turn in turns:
+        print("\n" + "-"*60)
+        print(f"Turn #{turn.get('turn_index')} [{turn.get('timestamp')}] User: '{turn.get('user_input')}'")
+        print("-" * 60)
+        for i, step in enumerate(turn.get("steps", [])):
+            stype = step.get("step_type")
+            if stype == "user_input":
+                print(f"  [Step {i+1}] User Input: {step.get('content')}")
+            elif stype == "thought":
+                print(f"  [Step {i+1}] Thought: {step.get('content')}")
+            elif stype == "function_call":
+                print(f"  [Step {i+1}] Function Call: '{step.get('tool_name')}' with args: {json.dumps(step.get('arguments'), default=str)}")
+            elif stype == "function_response":
+                print(f"  [Step {i+1}] Function Result ({step.get('tool_name')}): {step.get('result')}")
+            elif stype == "model_output":
+                print(f"  [Step {i+1}] Model Output: {step.get('content')}")
+            else:
+                print(f"  [Step {i+1}] {stype}: {step}")
+    print("\n" + "="*60)
+
+
 def observe_local_session(session_id: str = None) -> bool:
     session_dirs = ["sessions", "/tmp/sessions"]
     session_file = None
@@ -31,33 +61,7 @@ def observe_local_session(session_id: str = None) -> bool:
     with open(session_file, "r") as f:
         data = json.load(f)
 
-    print("\n" + "="*60)
-    print(f"LOCAL SESSION TRAJECTORY LOG (ID: {data.get('session_id')})")
-    print(f"Created At: {data.get('created_at')}")
-    print("="*60)
-
-    turns = data.get("turns", [])
-    print(f"Total Turns: {len(turns)}")
-
-    for turn in turns:
-        print("\n" + "-"*60)
-        print(f"Turn #{turn.get('turn_index')} [{turn.get('timestamp')}] User: '{turn.get('user_input')}'")
-        print("-" * 60)
-        for i, step in enumerate(turn.get("steps", [])):
-            stype = step.get("step_type")
-            if stype == "user_input":
-                print(f"  [Step {i+1}] User Input: {step.get('content')}")
-            elif stype == "thought":
-                print(f"  [Step {i+1}] Thought: {step.get('content')}")
-            elif stype == "function_call":
-                print(f"  [Step {i+1}] Function Call: '{step.get('tool_name')}' with args: {json.dumps(step.get('arguments'))}")
-            elif stype == "function_response":
-                print(f"  [Step {i+1}] Function Result ({step.get('tool_name')}): {step.get('result')}")
-            elif stype == "model_output":
-                print(f"  [Step {i+1}] Model Output: {step.get('content')}")
-            else:
-                print(f"  [Step {i+1}] {stype}: {step}")
-    print("\n" + "="*60)
+    print_trajectory(data, "LOCAL SESSION TRAJECTORY LOG")
     return True
 
 
@@ -73,7 +77,7 @@ def fetch_managed_gcp_session_events(engine_name: str, session_id: str):
         token = creds.token
 
         if not engine_name.startswith("projects/"):
-            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "geap-trial-run")
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT")
             engine_name = f"projects/{project}/locations/us-central1/reasoningEngines/{engine_name}"
 
         # If session_id is simple ID, construct full path
@@ -98,8 +102,18 @@ def fetch_managed_gcp_session_events(engine_name: str, session_id: str):
                 author = evt.get("author", "unknown")
                 timestamp = evt.get("timestamp", "")
                 parts = evt.get("content", {}).get("parts", [])
-                text = " ".join([p.get("text", "") for p in parts if "text" in p])
-                print(f"  [Event {i+1}] [{timestamp}] {author.upper()}: {text}")
+                # Every Part field is present with a null value, so summarise whichever one
+                # is actually populated rather than assuming the event carries text.
+                summary = []
+                for p in parts:
+                    if p.get("functionCall"):
+                        call = p["functionCall"]
+                        summary.append(f"[tool call] {call.get('name')}({json.dumps(call.get('args') or {})})")
+                    elif p.get("functionResponse"):
+                        summary.append(f"[tool result] {p['functionResponse'].get('name')}")
+                    elif p.get("text"):
+                        summary.append(p["text"])
+                print(f"  [Event {i+1}] [{timestamp}] {author.upper()}: {' '.join(summary)}")
             print("="*60)
             return True
     except Exception as e:
@@ -108,56 +122,35 @@ def fetch_managed_gcp_session_events(engine_name: str, session_id: str):
 
 
 def observe_adk_session(project: str, engine_name: str, session_id: str = None):
-    from google.cloud import aiplatform
-    from vertexai.preview import reasoning_engines
+    import adk_common
 
-    if not engine_name.startswith("projects/"):
-        engine_name = f"projects/{project}/locations/us-central1/reasoningEngines/{engine_name}"
-
+    engine_name = adk_common.resolve_engine_name(project, engine_name)
     print(f"Connecting to Reasoning Engine API: {engine_name}...")
-    aiplatform.init(project=project)
-    agent = reasoning_engines.ReasoningEngine(engine_name)
+    agent = adk_common.load_agent_engine(project, engine_name)
+    user_id = adk_common.DEFAULT_USER_ID
 
-    if session_id:
-        print(f"\nFetching Managed Session Events via GCP REST API for Session ID: {session_id}...")
-        fetch_managed_gcp_session_events(engine_name, session_id)
-
+    # Session IDs are issued by Agent Engine, so rather than demanding one we can look up
+    # the most recent session belonging to this user.
     if not session_id:
-        print("Error: --session_id is required to fetch Reasoning Engine session trajectory.")
-        return
+        session_id = adk_common.latest_session_id(agent, user_id)
+        if not session_id:
+            print(f"No managed sessions found for user '{user_id}' on {engine_name}.")
+            print("Run scripts/interact_adk_agent.py or verify_workshop.py --adk first.")
+            return
+        print(f"No --session_id given; using the most recent session: {session_id}")
 
-    print(f"\nFetching Session Trajectory via RPC for Session ID: {session_id}...")
+    print(f"\nFetching Managed Session Events via GCP REST API for Session ID: {session_id}...")
+    fetch_managed_gcp_session_events(engine_name, session_id)
+
+    print(f"\nFetching Session Trajectory via SDK for Session ID: {session_id}...")
     try:
-        raw_sess = agent.query(query="GET_SESSION", session_id=session_id)
-        sess_data = json.loads(raw_sess) if isinstance(raw_sess, str) else raw_sess
-        print("\n" + "="*60)
-        print(f"REASONING ENGINE SESSION TRAJECTORY (ID: {sess_data.get('session_id')})")
-        print(f"Created At: {sess_data.get('created_at')}")
-        print("="*60)
-
-        turns = sess_data.get("turns", [])
-        for turn in turns:
-            print("\n" + "-"*60)
-            print(f"Turn #{turn.get('turn_index')} [{turn.get('timestamp')}] User: '{turn.get('user_input')}'")
-            print("-" * 60)
-            for i, step in enumerate(turn.get("steps", [])):
-                stype = step.get("step_type")
-                if stype == "user_input":
-                    print(f"  [Step {i+1}] User Input: {step.get('content')}")
-                elif stype == "thought":
-                    print(f"  [Step {i+1}] Thought: {step.get('content')}")
-                elif stype == "function_call":
-                    print(f"  [Step {i+1}] Function Call: '{step.get('tool_name')}' with args: {json.dumps(step.get('arguments'))}")
-                elif stype == "function_response":
-                    print(f"  [Step {i+1}] Function Result ({step.get('tool_name')}): {step.get('result')}")
-                elif stype == "model_output":
-                    print(f"  [Step {i+1}] Model Output: {step.get('content')}")
-                else:
-                    print(f"  [Step {i+1}] {stype}: {step}")
-        print("\n" + "="*60)
-
+        session = agent.get_session(user_id=user_id, session_id=session_id)
     except Exception as e:
         print(f"Error fetching session trajectory: {e}")
+        return
+
+    print_trajectory(adk_common.session_to_trajectory(session, session_id),
+                     "REASONING ENGINE SESSION TRAJECTORY")
 
 
 def observe_interaction(project: str, interaction_id: str):
@@ -203,13 +196,17 @@ def observe_interaction(project: str, interaction_id: str):
 
 
 def main():
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "geap-workshop-temp-1")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     parser = argparse.ArgumentParser(description="View Agent Session & Trajectory Logs.")
     parser.add_argument("--session_id", type=str, help="Session ID to inspect.")
     parser.add_argument("--adk", type=str, help="Deployed ADK Reasoning Engine name or ID.")
     parser.add_argument("--interaction_id", type=str, help="Managed agent interaction ID.")
     parser.add_argument("--local", action="store_true", help="Force viewing local session trajectory.")
     args = parser.parse_args()
+
+    if not project and not args.local:
+        print("Error: GOOGLE_CLOUD_PROJECT environment variable is not set.")
+        sys.exit(1)
 
     if args.interaction_id:
         observe_interaction(project, args.interaction_id)

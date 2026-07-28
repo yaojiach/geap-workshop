@@ -11,6 +11,10 @@ import google.genai.types as genai_types
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+# How long to wait for a single background interaction before giving up. Without a bound
+# the poll loop below spins forever whenever the managed agent stalls.
+INTERACTION_TIMEOUT_SECONDS = int(os.environ.get("INTERACTION_TIMEOUT_SECONDS", "300"))
+
 def print_banner(text):
     print("\n" + "=" * 60)
     print(f" {text.upper()}")
@@ -206,10 +210,20 @@ def run_remote_verification(project, agent_id):
         while True:
             interaction = client.interactions.get(id=interaction.id)
             status = (interaction.status or "").lower()
-            print(f"[{time.time() - start:.0f}s] Status: {status}   ", end="\r", flush=True)
+            elapsed = time.time() - start
+            print(f"[{elapsed:.0f}s] Status: {status}   ", end="\r", flush=True)
             if status in ["succeeded", "failed", "cancelled", "completed", "requires_action"]:
                 print()
                 break
+            if elapsed > INTERACTION_TIMEOUT_SECONDS:
+                print()
+                raise TimeoutError(
+                    f"Interaction {interaction.id} was still '{status}' after "
+                    f"{INTERACTION_TIMEOUT_SECONDS}s. Managed agents currently stall when a "
+                    f"prompt requires an MCP tool call -- see the troubleshooting notes in "
+                    f"README.md. Inspect it with:\n"
+                    f"  python3 scripts/observe_agent.py --interaction_id {interaction.id}"
+                )
             time.sleep(2)
         print()
         print(f"Agent: {interaction.output_text.strip() if interaction.output_text else ''}")
@@ -270,20 +284,28 @@ def run_remote_verification(project, agent_id):
 
 def run_adk_verification(project, engine_name):
     print_banner("Running ADK Reasoning Engine Verification")
-    from google.cloud import aiplatform
-    from vertexai.preview import reasoning_engines
-    
-    session_id = f"adk-verify-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    import adk_common
+
     print(f"Initializing SDK & loading Reasoning Engine: {engine_name}...")
-    print(f"Active Session ID: {session_id}")
-    aiplatform.init(project=project)
-    agent = reasoning_engines.ReasoningEngine(engine_name)
-    
+    agent = adk_common.load_agent_engine(project, engine_name)
+    user_id = adk_common.DEFAULT_USER_ID
+
+    # The session ID must be issued by Agent Engine -- a locally invented ID has no
+    # server-side history, so the agent would forget everything between turns.
+    session_id = adk_common.create_session(agent, user_id)
+    print(f"Active Session ID: {session_id} (user: {user_id})")
+
     def converse(prompt):
         print(f"\nUser: {prompt}")
-        response = agent.query(query=prompt, session_id=session_id)
+        response = adk_common.stream_turn(
+            agent, prompt, session_id=session_id, user_id=user_id,
+            on_tool_call=lambda name, args: print(
+                f"  [Tool Call] {name} with args: {json.dumps(args, default=str)}"),
+            on_tool_response=lambda name, result: print(
+                f"  [Tool Result] {name}: {json.dumps(result, default=str)[:300]}"),
+        )
         print(f"Agent: {response}")
-        
+
     print_banner("1. Listing Initial Inventory")
     converse("List all items in the warehouse inventory.")
 
@@ -302,9 +324,12 @@ def run_adk_verification(project, engine_name):
     print_banner("6. Session Trajectory Traversal via API")
     print(f"Fetching session trajectory for session '{session_id}' via agent API...")
     try:
-        raw_sess = agent.query(query="GET_SESSION", session_id=session_id)
-        sess_data = json.loads(raw_sess) if isinstance(raw_sess, str) else raw_sess
-        print(json.dumps(sess_data, indent=2))
+        session = agent.get_session(user_id=user_id, session_id=session_id)
+        trajectory = adk_common.session_to_trajectory(session, session_id)
+        log_file = save_session_trajectory(session_id, trajectory)
+        print(json.dumps(trajectory, indent=2, default=str))
+        print(f"\nSession trajectory saved to: {log_file}")
+        print(f"Total conversation turns in session '{session_id}': {len(trajectory['turns'])}")
     except Exception as e:
         print(f"Failed to fetch session trajectory via API: {e}")
 
@@ -335,7 +360,11 @@ def main():
             engine_name = f"projects/{project}/locations/us-central1/reasoningEngines/{args.adk}"
         run_adk_verification(project, engine_name)
     elif args.remote:
-        run_remote_verification(project, agent_id)
+        try:
+            run_remote_verification(project, agent_id)
+        except TimeoutError as e:
+            print(f"\nERROR: {e}")
+            sys.exit(1)
     else:
         if not mcp_url:
             print("Error: MCP_SERVER_URL environment variable is not set.")

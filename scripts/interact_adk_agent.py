@@ -2,73 +2,65 @@ import argparse
 import json
 import os
 import sys
-import time
-import uuid
-import vertexai
-from vertexai import agent_engines
-from vertexai.preview import reasoning_engines
+
+import adk_common
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive CLI Client for Deployed ADK Agent")
     parser.add_argument("--resource_name", help="Reasoning Engine resource name")
     parser.add_argument("--query", help="Single query to run non-interactively")
+    parser.add_argument("--session_id", help="Reuse an existing managed session instead of creating one")
     args = parser.parse_args()
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "geap-workshop-temp-1")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project:
+        print("Error: GOOGLE_CLOUD_PROJECT environment variable is not set.")
+        sys.exit(1)
     location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-    
+    user_id = adk_common.DEFAULT_USER_ID
+
     engine_name = args.resource_name or os.environ.get("REASONING_ENGINE_NAME")
     if not engine_name:
         print("Error: REASONING_ENGINE_NAME environment variable or --resource_name is required.")
         sys.exit(1)
 
-    session_id = os.environ.get("SESSION_ID") or f"adk-session-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-        
     print(f"Initializing Vertex AI SDK (Project: {project}, Location: {location})...")
-    vertexai.init(project=project, location=location)
-
     print(f"Connecting to Reasoning Engine: {engine_name}...")
-    agent = None
     try:
-        agent = agent_engines.get(engine_name)
+        agent = adk_common.load_agent_engine(project, engine_name, location)
     except Exception as e:
-        try:
-            agent = reasoning_engines.ReasoningEngine(engine_name)
-        except Exception as e2:
-            print(f"Error loading Reasoning Engine: {e2}", file=sys.stderr)
-            sys.exit(1)
+        print(f"Error loading Reasoning Engine: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    def execute_query(user_input: str):
-        if hasattr(agent, "stream_query"):
-            events = list(agent.stream_query(user_id=session_id, message=user_input))
-            final_text = ""
-            for ev in events:
-                if isinstance(ev, dict) and "content" in ev:
-                    parts = ev["content"].get("parts", [])
-                    for p in parts:
-                        if "text" in p:
-                            final_text += p["text"]
-                        elif "function_call" in p:
-                            fc = p["function_call"]
-                            print(f"  [Tool Call] {fc.get('name')}({fc.get('args')})")
-                        elif "function_response" in p:
-                            fr = p["function_response"]
-                            print(f"  [Tool Response] {fr.get('name')}")
-            return final_text or str(events)
-        elif hasattr(agent, "query"):
-            return agent.query(query=user_input, session_id=session_id)
-        else:
-            raise AttributeError("Agent has neither stream_query nor query method.")
+    # Sessions are created and stored by Agent Engine; the ID has to come from the service.
+    # Making one up client-side means every turn starts from an empty history.
+    session_id = args.session_id or os.environ.get("SESSION_ID")
+    if session_id:
+        print(f"Reusing managed session: {session_id}")
+    else:
+        session_id = adk_common.create_session(agent, user_id)
+        print(f"Created managed session: {session_id}")
+
+    def execute_query(user_input: str) -> str:
+        return adk_common.stream_turn(
+            agent,
+            user_input,
+            session_id=session_id,
+            user_id=user_id,
+            on_tool_call=lambda name, tool_args: print(f"  [Tool Call] {name}({tool_args})"),
+            on_tool_response=lambda name, _result: print(f"  [Tool Response] {name}"),
+        )
 
     if args.query:
         print(f"\nQuerying Agent: '{args.query}'...")
         res = execute_query(args.query)
         print(f"\nAgent Response:\n{res}")
+        print(f"\n[Session ID: {session_id}]")
         return
 
     print("\n" + "="*60)
     print("Welcome to the Vertex AI Reasoning Engine ADK Agent CLI Client!")
-    print(f"Active Session ID: {session_id}")
+    print(f"Active Session ID: {session_id} (user: {user_id})")
     print("="*60)
     print("This interactive console allows you to chat directly with your remote Python-packaged agent.")
     print("Type 'exit' or 'quit' to end the conversation.")
@@ -87,11 +79,8 @@ def main():
             if user_input.strip().lower() in ["session", "trajectory"]:
                 print(f"\nFetching Session Trajectory via API for Session: {session_id}...")
                 try:
-                    if hasattr(agent, "get_session"):
-                        sess_data = agent.get_session(session_id=session_id)
-                        print(json.dumps(sess_data, indent=2))
-                    else:
-                        print("get_session is not supported on this agent engine.")
+                    sess_data = agent.get_session(user_id=user_id, session_id=session_id)
+                    print(json.dumps(sess_data, indent=2, default=str))
                 except Exception as e:
                     print(f"Could not fetch session data: {e}")
                 continue
@@ -99,7 +88,7 @@ def main():
             print("\nThinking (Remote Agent executing reasoning loop)...")
             response = execute_query(user_input)
             print(f"\nAgent:\n{response}")
-            
+
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break

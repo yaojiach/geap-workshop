@@ -88,6 +88,11 @@ def main():
                 "langchain-google-vertexai",
                 "cloudpickle",
                 "pydantic",
+                # Without these the container resolves an opentelemetry-api that predates
+                # `opentelemetry._events`, and Agent Engine's own telemetry_utils fails to
+                # import at startup ("failed to start and cannot serve traffic").
+                "opentelemetry-api>=1.30",
+                "opentelemetry-sdk>=1.30",
             ],
             display_name=f"{prefix}-sample-langchain-agent",
             gcs_dir_name=f"{prefix}-langchain-agent",

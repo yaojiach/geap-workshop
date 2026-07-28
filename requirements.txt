@@ -8,11 +8,15 @@ sqlalchemy==2.0.51
 pg8000==1.31.5
 pyOpenSSL
 cloud-sql-python-connector[pg8000]
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp-proto-http
-opentelemetry-instrumentation==0.64b0
-opentelemetry-semantic-conventions==0.64b0
+# google-adk 2.x caps opentelemetry-api/sdk at <=1.42.1, so the instrumentation and
+# semantic-convention packages have to stay on the matching 0.63b1 line. Pinning them to
+# 0.64b0 makes pip resolve google-adk back down to 1.10.0, whose Runner does not accept the
+# `app` argument that vertexai's AdkApp.set_up() passes (Section 4, Option C fails).
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp-proto-http==1.42.1
+opentelemetry-instrumentation==0.63b1
+opentelemetry-semantic-conventions==0.63b1
 opentelemetry-util-genai==0.3b0
 opentelemetry-exporter-gcp-logging==1.12.0a0
 opentelemetry-exporter-gcp-trace==1.12.0
@@ -20,5 +24,4 @@ opentelemetry-resourcedetector-gcp==1.12.0a0
 opentelemetry-instrumentation-google-genai==0.7b1
 cloudpickle==3.1.2
 pydantic==2.13.4
-google-adk
-
+google-adk>=2.5.0
