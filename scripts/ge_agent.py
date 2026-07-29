@@ -54,19 +54,51 @@ def list_apps(project):
         print(f"{e['name'].split('/')[-1]:>45}  {e.get('solutionType','-'):32}  {e.get('displayName')}")
 
 
-def list_agents(project, engine):
+def fetch_agents(project, engine):
     # The agents collection is only exposed on v1alpha.
     url = f"https://{HOST}/v1alpha/{assistant(project, engine)}/agents?pageSize=100"
     r = requests.get(url, headers=headers(), timeout=60)
     r.raise_for_status()
-    for a in r.json().get("agents", []):
-        kind = next((k for k in a if k.endswith("AgentDefinition")), "-")
-        engine_ref = ""
-        if kind == "adkAgentDefinition":
-            engine_ref = (a[kind].get("provisionedReasoningEngine", {})
-                          .get("reasoningEngine", "")).split("/")[-1]
-        print(f"{a['name'].split('/')[-1]:>22}  {a.get('state','-'):8}  {kind:24}  "
-              f"{a.get('displayName')}{f'  -> reasoningEngine {engine_ref}' if engine_ref else ''}")
+    return r.json().get("agents", [])
+
+
+def describe_agent(a):
+    kind = next((k for k in a if k.endswith("AgentDefinition")), "-")
+    engine_ref = ""
+    if kind == "adkAgentDefinition":
+        engine_ref = (a[kind].get("provisionedReasoningEngine", {})
+                      .get("reasoningEngine", "")).split("/")[-1]
+    return (f"{a['name'].split('/')[-1]:>22}  {a.get('state','-'):8}  {kind:24}  "
+            f"{a.get('displayName')}{f'  -> reasoningEngine {engine_ref}' if engine_ref else ''}")
+
+
+def list_agents(project, engine):
+    for a in fetch_agents(project, engine):
+        print(describe_agent(a))
+
+
+def check_agent(project, engine, agent_id):
+    """Fail loudly on an agent id this assistant does not have.
+
+    An unknown agentId is not rejected by :streamAssist -- the turn silently falls
+    through to the default orchestrator, which answers in a plausible but generic
+    voice ("I don't have direct access to your warehouse inventory system"). That
+    reads like a broken agent rather than a bad id, so verify up front.
+    """
+    agents = fetch_agents(project, engine)
+    if any(a["name"].split("/")[-1] == agent_id for a in agents):
+        return
+    print(f"Agent '{agent_id}' is not registered on this assistant "
+          f"(engine {engine}).\nAn unknown agentId would be silently ignored and the "
+          f"turn answered by the default orchestrator, so refusing to send it.\n",
+          file=sys.stderr)
+    if agents:
+        print("Available agents:", file=sys.stderr)
+        for a in agents:
+            print(f"  {describe_agent(a)}", file=sys.stderr)
+    else:
+        print("This assistant has no agents registered yet.", file=sys.stderr)
+    sys.exit(1)
 
 
 def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
@@ -112,6 +144,8 @@ def main():
     p.add_argument("--engine", default=os.environ.get("GE_ENGINE_ID"), help="Gemini Enterprise app/engine id")
     p.add_argument("--session", help="existing session resource name, for multi-turn")
     p.add_argument("--show-tools", action="store_true", help="also print tool call/result chunks")
+    p.add_argument("--no-check-agent", action="store_true",
+                   help="skip verifying --agent against the assistant's agent list")
     args = p.parse_args()
 
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -128,6 +162,8 @@ def main():
     if args.list:
         list_agents(project, args.engine)
     elif args.query:
+        if args.agent and not args.no_check_agent:
+            check_agent(project, args.engine, args.agent)
         session = ask(project, args.engine, args.query, args.agent, args.session, args.show_tools)
         print(f"\nsession: {session}")
     else:
