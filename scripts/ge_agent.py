@@ -188,10 +188,30 @@ def check_agent(project, engine, agent_id):
     sys.exit(1)
 
 
+def create_agent_session(project, engine, agent_id):
+    """Open a session that is bound to `agent_id` by its labels.
+
+    This is the step the web UI takes before its first turn, and it is the piece
+    `agentsSpec` alone does not always cover: on some apps the request field is enough,
+    on others the turn is answered by the default orchestrator unless the session itself
+    is labelled. The labels are the UI's, verbatim -- `agent:vertex-ai-sdk-agent:{id}` is
+    the one that names the agent, and the two bare prefixes accompany it.
+    """
+    url = f"https://{HOST}/v1alpha/{collection(project)}/engines/{engine}/sessions"
+    labels = ["agent", "agent:vertex-ai-sdk-agent", f"agent:vertex-ai-sdk-agent:{agent_id}"]
+    r = requests.post(url, headers=headers(project), json={"labels": labels}, timeout=60)
+    if r.status_code >= 400:
+        print(f"HTTP {r.status_code}: {r.text}", file=sys.stderr)
+        r.raise_for_status()
+    return r.json()["name"]
+
+
 def ask(project, engine, text, agent_id=None, session=None, show_tools=False, raw=False):
     body: dict = {"query": {"text": text}}
     if agent_id:
         body["agentsSpec"] = {"agentSpecs": [{"agentId": agent_id}]}
+        if not session:
+            session = create_agent_session(project, engine, agent_id)
     if session:
         body["session"] = session
     if API_VERSION in ALPHA_ONLY_VERSIONS:
@@ -223,7 +243,8 @@ def ask(project, engine, text, agent_id=None, session=None, show_tools=False, ra
     # voice is indistinguishable from a badly-behaved agent, and "was an agent id
     # actually resolved?" is the first thing you need to know when that happens.
     route = agent_id or "NONE -> default orchestrator"
-    print(f"[ge_agent] {API_VERSION}  engine={engine}  agent={route}", file=sys.stderr)
+    print(f"[ge_agent] {API_VERSION}  engine={engine}  agent={route}"
+          f"  session={session.split('/')[-1] if session else 'none'}", file=sys.stderr)
     if DEBUG:
         print(json.dumps(body, indent=2), file=sys.stderr)
 
