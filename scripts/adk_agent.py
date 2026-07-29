@@ -159,11 +159,13 @@ def deploy_agent(project_id: str, location: str, mcp_url: str, staging_bucket: s
                 "google-adk>=2.5.0",
                 "google-cloud-aiplatform",
                 "google-genai",
-                # Pinned, not >=. mcp 2.0 switched its transports from httpx to httpx2,
-                # so `streamable_http_client(http_client=httpx.AsyncClient(...))` below
-                # breaks at call time -- the agent deploys and answers fine, then every
-                # tool call fails and the model reports a vague internal error. Keep in
-                # sync with requirements.txt and mcp_server/requirements.txt.
+                # Pinned, not >=. streamable_http_client yields three values on 1.x and
+                # two on 2.0, so the `as (read, write, _)` unpack in _execute_mcp_tool
+                # raises "not enough values to unpack (expected 3, got 2)" against 2.0.
+                # The agent still deploys and converses -- only tool calls fail, and the
+                # model reports them as a vague internal error. (2.0 also moved its
+                # transports from httpx to httpx2.) Keep in sync with requirements.txt
+                # and mcp_server/requirements.txt.
                 "mcp==1.28.1",
                 "httpx>=0.20.0",
                 "anyio",
