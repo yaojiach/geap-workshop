@@ -47,6 +47,8 @@ API_VERSION = os.environ.get("GE_API_VERSION", "v1alpha")
 # v1 and v1beta reject these UI-only fields outright with HTTP 400 "Unknown name".
 ALPHA_ONLY_VERSIONS = ("v1alpha",)
 
+DEBUG = bool(os.environ.get("GE_DEBUG"))
+
 HOST = ("discoveryengine.googleapis.com" if LOCATION == "global"
         else f"{LOCATION}-discoveryengine.googleapis.com")
 
@@ -136,6 +138,14 @@ def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
         if agent_id:
             body["agentsConfig"] = {"agent": agent_id}
             body["answerGenerationMode"] = "AGENT"
+
+    # Always say who the turn was routed to. An answer in the default orchestrator's
+    # voice is indistinguishable from a badly-behaved agent, and "was an agent id
+    # actually resolved?" is the first thing you need to know when that happens.
+    route = agent_id or "NONE -> default orchestrator"
+    print(f"[ge_agent] {API_VERSION}  engine={engine}  agent={route}", file=sys.stderr)
+    if DEBUG:
+        print(json.dumps(body, indent=2), file=sys.stderr)
 
     url = f"https://{HOST}/{API_VERSION}/{assistant(project, engine)}:streamAssist"
     r = requests.post(url, headers=headers(), json=body, timeout=300)
