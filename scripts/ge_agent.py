@@ -143,7 +143,7 @@ def check_agent(project, engine, agent_id):
     sys.exit(1)
 
 
-def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
+def ask(project, engine, text, agent_id=None, session=None, show_tools=False, raw=False):
     body: dict = {"query": {"text": text}}
     if agent_id:
         body["agentsSpec"] = {"agentSpecs": [{"agentId": agent_id}]}
@@ -188,8 +188,16 @@ def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
         print(f"HTTP {r.status_code}: {r.text}", file=sys.stderr)
         r.raise_for_status()
 
+    chunks = r.json()
+    if raw:
+        # The printed text alone cannot tell you whether the agent was invoked and
+        # answered like an orchestrator, or never invoked at all. The chunks carry
+        # metadata the pretty-printer drops -- assistToken, agent/session info, and
+        # any per-reply attribution -- which is the only in-band evidence of routing.
+        print(json.dumps(chunks, indent=2), file=sys.stderr)
+
     out_session = session
-    for chunk in r.json():
+    for chunk in chunks:
         # A session id is minted on the first turn and echoed back in sessionInfo;
         # multi-turn is just feeding that value back in via --session.
         out_session = chunk.get("sessionInfo", {}).get("session", out_session)
@@ -220,6 +228,7 @@ def main():
     p.add_argument("--engine", default=os.environ.get("GE_ENGINE_ID"), help="Gemini Enterprise app/engine id")
     p.add_argument("--session", help="existing session resource name, for multi-turn")
     p.add_argument("--show-tools", action="store_true", help="also print tool call/result chunks")
+    p.add_argument("--raw", action="store_true", help="dump the full :streamAssist response to stderr")
     p.add_argument("--no-check-agent", action="store_true",
                    help="skip verifying --agent against the assistant's agent list")
     args = p.parse_args()
@@ -242,7 +251,8 @@ def main():
     elif args.query:
         if args.agent and not args.no_check_agent:
             check_agent(project, args.engine, args.agent)
-        session = ask(project, args.engine, args.query, args.agent, args.session, args.show_tools)
+        session = ask(project, args.engine, args.query, args.agent, args.session,
+                      args.show_tools, args.raw)
         print(f"\nsession: {session}")
     else:
         p.error("give a query, --list or --list-apps")
