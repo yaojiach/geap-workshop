@@ -97,6 +97,21 @@ def list_agents(project, engine):
         print(describe_agent(a))
 
 
+def describe(project, engine, agent_id):
+    """Dump the raw agent and assistant resources.
+
+    Worth diffing against an app where routing does work. The interesting fields
+    are undocumented: `agentInvocationSpec.invocationMode` appears to decide whether
+    the orchestrator will hand a turn to this agent at all, which is exactly the
+    difference between "answers when picked in the UI" and "ignored via the API".
+    """
+    base = f"https://{HOST}/v1alpha/{assistant(project, engine)}"
+    for label, url in (("agent", f"{base}/agents/{agent_id}"), ("assistant", base)):
+        r = requests.get(url, headers=headers(), timeout=60)
+        print(f"===== {label} ({r.status_code}) =====")
+        print(json.dumps(r.json(), indent=4))
+
+
 def check_agent(project, engine, agent_id):
     """Fail loudly on an agent id this assistant does not have.
 
@@ -191,6 +206,8 @@ def main():
     p.add_argument("query", nargs="?")
     p.add_argument("--list-apps", action="store_true", help="list Gemini Enterprise apps in the project")
     p.add_argument("--list", action="store_true", help="list agents on this app's assistant")
+    p.add_argument("--describe", action="store_true",
+                   help="dump the raw agent + assistant resources for --agent")
     p.add_argument("--agent", default=os.environ.get("GE_AGENT_ID"),
                    help="agent id (omit to let the default orchestrator route the turn)")
     p.add_argument("--engine", default=os.environ.get("GE_ENGINE_ID"), help="Gemini Enterprise app/engine id")
@@ -213,6 +230,10 @@ def main():
 
     if args.list:
         list_agents(project, args.engine)
+    elif args.describe:
+        if not args.agent:
+            p.error("--describe needs --agent or GE_AGENT_ID")
+        describe(project, args.engine, args.agent)
     elif args.query:
         if args.agent and not args.no_check_agent:
             check_agent(project, args.engine, args.agent)
