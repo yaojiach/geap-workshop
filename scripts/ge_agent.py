@@ -128,13 +128,26 @@ def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
     if session:
         body["session"] = session
     if API_VERSION in ALPHA_ONLY_VERSIONS:
-        # Mirror the fields the web UI sends. `assistSkippingMode` is what keeps a
-        # greeting from being dropped before it reaches the agent. `agentsConfig` and
-        # `answerGenerationMode` are redundant with `agentsSpec` on some Gemini
-        # Enterprise apps and apparently required on others -- newer apps have been seen
-        # answering in the default orchestrator's voice with `agentsSpec` alone -- so
-        # send all three rather than guessing which vintage this app is.
+        # Reproduce the body the web UI posts, field for field. Which of these the
+        # backend actually needs varies by app: on one app `agentsSpec` alone routes
+        # correctly, on a newer one the same request is answered by the default
+        # orchestrator. Rather than bisect that per app, send what the UI sends -- every
+        # field below is accepted on v1alpha and none of them changes routing on an app
+        # that already works. (`configId`, `additionalParams` and
+        # `experimentIdsForLogging` sit *outside* `streamAssistRequest` in the UI's own
+        # wrapper, are not part of :streamAssist, and would be rejected as unknown.)
+        body["query"] = {"parts": [{"text": text}]}
         body["assistSkippingMode"] = "REQUEST_ASSIST"
+        body["toolsSpec"] = {
+            "webGroundingSpec": {},
+            "toolRegistry": "default_tool_registry",
+            "imageGenerationSpec": {},
+            "videoGenerationSpec": {},
+            "canvasSpec": {},
+        }
+        body["languageCode"] = os.environ.get("GE_LANGUAGE_CODE", "en-US")
+        body["filter"] = ""
+        body["fileIds"] = []
         if agent_id:
             body["agentsConfig"] = {"agent": agent_id}
             body["answerGenerationMode"] = "AGENT"
