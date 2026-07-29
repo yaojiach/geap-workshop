@@ -7,9 +7,17 @@ also be reached through the public Discovery Engine API, which is what the Gemin
 Enterprise web UI itself talks to.
 
 The UI posts a large internal payload to `:streamAssist` (configId,
-experimentIdsForLogging, additionalParams, ...). Almost none of it is required --
-`agentsSpec.agentSpecs[].agentId` is what routes the turn to a specific agent, and it is
-accepted on v1 (GA), v1beta and v1alpha alike.
+experimentIdsForLogging, additionalParams, ...). Most of it is noise, but two fields are
+load-bearing and neither appears in the published discovery document:
+
+  agentsSpec.agentSpecs[].agentId  routes the turn to a specific agent (works on v1,
+                                   v1beta and v1alpha)
+  assistSkippingMode=REQUEST_ASSIST  stops the assistant from dropping anything its
+                                   classifier reads as chit-chat; v1alpha only, so that
+                                   is the default version here
+
+Without the second one, `ge_agent.py "hi"` comes back empty with
+NON_ASSIST_SEEKING_QUERY_IGNORED while the same greeting is answered in the web UI.
 
   export GOOGLE_CLOUD_PROJECT=your-project
   export GE_ENGINE_ID=gemini-enterprise-xxxxxxxx_xxxxxxxxxxxxx
@@ -27,7 +35,17 @@ import sys
 import requests
 
 LOCATION = os.environ.get("GE_LOCATION", "global")
-API_VERSION = "v1"
+
+# v1alpha, not v1. Several fields the GE web UI sends are missing from the published
+# discovery document *and* from the v1/v1beta backends, which reject unknown names with
+# HTTP 400 rather than ignoring them. The one that matters here is `assistSkippingMode`:
+# without it the assistant drops anything its classifier reads as chit-chat ("hi") with
+# NON_ASSIST_SEEKING_QUERY_IGNORED and never reaches the agent at all.
+# (`agentsSpec` is undocumented too, but it does work on all three versions.)
+API_VERSION = os.environ.get("GE_API_VERSION", "v1alpha")
+
+# v1 and v1beta reject these UI-only fields outright with HTTP 400 "Unknown name".
+ALPHA_ONLY_VERSIONS = ("v1alpha",)
 
 HOST = ("discoveryengine.googleapis.com" if LOCATION == "global"
         else f"{LOCATION}-discoveryengine.googleapis.com")
@@ -102,11 +120,22 @@ def check_agent(project, engine, agent_id):
 
 
 def ask(project, engine, text, agent_id=None, session=None, show_tools=False):
-    body = {"query": {"text": text}}
+    body: dict = {"query": {"text": text}}
     if agent_id:
         body["agentsSpec"] = {"agentSpecs": [{"agentId": agent_id}]}
     if session:
         body["session"] = session
+    if API_VERSION in ALPHA_ONLY_VERSIONS:
+        # Mirror the fields the web UI sends. `assistSkippingMode` is what keeps a
+        # greeting from being dropped before it reaches the agent. `agentsConfig` and
+        # `answerGenerationMode` are redundant with `agentsSpec` on some Gemini
+        # Enterprise apps and apparently required on others -- newer apps have been seen
+        # answering in the default orchestrator's voice with `agentsSpec` alone -- so
+        # send all three rather than guessing which vintage this app is.
+        body["assistSkippingMode"] = "REQUEST_ASSIST"
+        if agent_id:
+            body["agentsConfig"] = {"agent": agent_id}
+            body["answerGenerationMode"] = "AGENT"
 
     url = f"https://{HOST}/{API_VERSION}/{assistant(project, engine)}:streamAssist"
     r = requests.post(url, headers=headers(), json=body, timeout=300)
