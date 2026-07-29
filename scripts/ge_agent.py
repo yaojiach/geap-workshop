@@ -19,6 +19,19 @@ load-bearing and neither appears in the published discovery document:
 Without the second one, `ge_agent.py "hi"` comes back empty with
 NON_ASSIST_SEEKING_QUERY_IGNORED while the same greeting is answered in the web UI.
 
+KNOWN LIMITATION -- newer Gemini Enterprise projects ignore agent routing entirely.
+On a project served by the newer GE backend (observed on one created 2026-07), the
+public :streamAssist accepts `agentsSpec` and answers with the default orchestrator
+anyway, with nothing in the response to say the agent was skipped. This is not a
+request problem: on such a project the same body fails for every agent (including
+Google's own deep_research), on every API version, with or without a labeled session,
+for agents created via console or API, and even on a brand-new API-created engine.
+The web UI still routes because it goes through the private widgetStreamAssist RPC
+(discoveryengine.clients6.google.com + configId + browser cookie auth), which is not
+callable with a Bearer token. `scripts/ge_probe.py` reproduces this diagnosis in one
+pass. On such projects, talk to the agent directly via `interact_adk_agent.py`
+(Section 4 Option C) instead.
+
   export GOOGLE_CLOUD_PROJECT=your-project
   export GE_ENGINE_ID=gemini-enterprise-xxxxxxxx_xxxxxxxxxxxxx
   python3 scripts/ge_agent.py --list-apps                     # find GE_ENGINE_ID
