@@ -41,6 +41,19 @@ def main():
         session_id = adk_common.create_session(agent, user_id)
         print(f"Created managed session: {session_id}")
 
+    def show_tool_response(name, result):
+        # The MCP tools return their failures as an ordinary string with the full
+        # traceback in it (see _execute_mcp_tool in adk_agent.py), so dropping the
+        # result here turns a precise remote stack trace into the model's vague
+        # "I was unable to retrieve the inventory list due to an internal error."
+        text = result if isinstance(result, str) else str(result)
+        if text.startswith("Error"):
+            print(f"  [Tool Response] {name} FAILED:\n{text}")
+        else:
+            first = text.strip().splitlines()[0] if text.strip() else ""
+            print(f"  [Tool Response] {name}  {first[:100]}"
+                  f"{' ...' if len(text) > 100 else ''}")
+
     def execute_query(user_input: str) -> str:
         return adk_common.stream_turn(
             agent,
@@ -48,7 +61,7 @@ def main():
             session_id=session_id,
             user_id=user_id,
             on_tool_call=lambda name, tool_args: print(f"  [Tool Call] {name}({tool_args})"),
-            on_tool_response=lambda name, _result: print(f"  [Tool Response] {name}"),
+            on_tool_response=show_tool_response,
         )
 
     if args.query:

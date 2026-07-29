@@ -159,7 +159,12 @@ def deploy_agent(project_id: str, location: str, mcp_url: str, staging_bucket: s
                 "google-adk>=2.5.0",
                 "google-cloud-aiplatform",
                 "google-genai",
-                "mcp>=0.1.0",
+                # Pinned, not >=. mcp 2.0 switched its transports from httpx to httpx2,
+                # so `streamable_http_client(http_client=httpx.AsyncClient(...))` below
+                # breaks at call time -- the agent deploys and answers fine, then every
+                # tool call fails and the model reports a vague internal error. Keep in
+                # sync with requirements.txt and mcp_server/requirements.txt.
+                "mcp==1.28.1",
                 "httpx>=0.20.0",
                 "anyio",
                 "pyjwt",
