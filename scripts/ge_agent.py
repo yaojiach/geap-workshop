@@ -61,14 +61,24 @@ def assistant(project, engine):
     return f"{collection(project)}/engines/{engine}/assistants/default_assistant"
 
 
-def headers():
+def headers(project):
     token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        # A bare user access token carries no quota project, so the backend picks one
+        # itself -- and it does not have to be the project in the URL. When it guesses
+        # wrong you get "SERVICE_DISABLED ... consumer: projects/<some other number>"
+        # on the calls that check, and, worse, calls that do not check are served
+        # against the wrong consumer: :streamAssist still answers, but from the default
+        # orchestrator, as if the agents registered in *this* project did not exist.
+        "x-goog-user-project": project,
+    }
 
 
 def list_apps(project):
     url = f"https://{HOST}/{API_VERSION}/{collection(project)}/engines?pageSize=100"
-    r = requests.get(url, headers=headers(), timeout=60)
+    r = requests.get(url, headers=headers(project), timeout=60)
     r.raise_for_status()
     for e in r.json().get("engines", []):
         print(f"{e['name'].split('/')[-1]:>45}  {e.get('solutionType','-'):32}  {e.get('displayName')}")
@@ -77,7 +87,7 @@ def list_apps(project):
 def fetch_agents(project, engine):
     # The agents collection is only exposed on v1alpha.
     url = f"https://{HOST}/v1alpha/{assistant(project, engine)}/agents?pageSize=100"
-    r = requests.get(url, headers=headers(), timeout=60)
+    r = requests.get(url, headers=headers(project), timeout=60)
     r.raise_for_status()
     return r.json().get("agents", [])
 
@@ -114,7 +124,7 @@ def describe(project, engine, agent_id=None):
     if agent_id:
         targets.append(("agent", f"https://{HOST}/v1alpha/{assistant(project, engine)}/agents/{agent_id}"))
     for label, url in targets:
-        r = requests.get(url, headers=headers(), timeout=60)
+        r = requests.get(url, headers=headers(project), timeout=60)
         print(f"===== {label} ({r.status_code}) =====")
         print(json.dumps(r.json(), indent=4))
 
@@ -183,7 +193,7 @@ def ask(project, engine, text, agent_id=None, session=None, show_tools=False, ra
         print(json.dumps(body, indent=2), file=sys.stderr)
 
     url = f"https://{HOST}/{API_VERSION}/{assistant(project, engine)}:streamAssist"
-    r = requests.post(url, headers=headers(), json=body, timeout=300)
+    r = requests.post(url, headers=headers(project), json=body, timeout=300)
     if r.status_code >= 400:
         print(f"HTTP {r.status_code}: {r.text}", file=sys.stderr)
         r.raise_for_status()
