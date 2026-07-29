@@ -97,16 +97,23 @@ def list_agents(project, engine):
         print(describe_agent(a))
 
 
-def describe(project, engine, agent_id):
-    """Dump the raw agent and assistant resources.
+def describe(project, engine, agent_id=None):
+    """Dump the raw engine, assistant and agent resources.
 
-    Worth diffing against an app where routing does work. The interesting fields
-    are undocumented: `agentInvocationSpec.invocationMode` appears to decide whether
-    the orchestrator will hand a turn to this agent at all, which is exactly the
-    difference between "answers when picked in the UI" and "ignored via the API".
+    For diffing against an app where `agentsSpec` routing does work. Nothing in the
+    :streamAssist request explains why one app honours an agentId and another answers
+    the turn with its default orchestrator, so the difference has to be in the app's
+    own configuration -- and much of that configuration is missing from the published
+    discovery document, so dump it raw rather than trusting the schema.
+
+    `assistants` is a plural collection: an app with more than one is worth a second
+    look, since everything here hardcodes `default_assistant`.
     """
-    base = f"https://{HOST}/v1alpha/{assistant(project, engine)}"
-    for label, url in (("agent", f"{base}/agents/{agent_id}"), ("assistant", base)):
+    eng = f"https://{HOST}/v1alpha/{collection(project)}/engines/{engine}"
+    targets = [("engine", eng), ("assistants", f"{eng}/assistants?pageSize=100")]
+    if agent_id:
+        targets.append(("agent", f"https://{HOST}/v1alpha/{assistant(project, engine)}/agents/{agent_id}"))
+    for label, url in targets:
         r = requests.get(url, headers=headers(), timeout=60)
         print(f"===== {label} ({r.status_code}) =====")
         print(json.dumps(r.json(), indent=4))
@@ -231,8 +238,6 @@ def main():
     if args.list:
         list_agents(project, args.engine)
     elif args.describe:
-        if not args.agent:
-            p.error("--describe needs --agent or GE_AGENT_ID")
         describe(project, args.engine, args.agent)
     elif args.query:
         if args.agent and not args.no_check_agent:
