@@ -129,6 +129,41 @@ def describe(project, engine, agent_id=None):
         print(json.dumps(r.json(), indent=4))
 
 
+ORCHESTRATION_FEATURES = ("disable-single-agent-orchestration",
+                          "disable-multi-agent-orchestration")
+
+
+def enable_orchestration(project, engine):
+    """Turn the engine's agent orchestration back on.
+
+    An app created with `disable-single-agent-orchestration: FEATURE_STATE_ON` never
+    hands a turn to a registered agent -- the assistant answers everything itself, and
+    `agentsSpec` is accepted and ignored. The reply is a fluent, plausible one from the
+    default orchestrator, so nothing about it looks like a misconfiguration.
+
+    `features` is a proto map and `updateMask=features` replaces it wholesale, so read
+    the current map and write it back with only these keys flipped.
+    """
+    url = f"https://{HOST}/v1alpha/{collection(project)}/engines/{engine}"
+    r = requests.get(url, headers=headers(project), timeout=60)
+    r.raise_for_status()
+    features = r.json().get("features", {})
+
+    stale = [k for k in ORCHESTRATION_FEATURES if features.get(k) == "FEATURE_STATE_ON"]
+    if not stale:
+        print("Orchestration is already enabled on this app; nothing to do.")
+        return
+    for k in stale:
+        features[k] = "FEATURE_STATE_OFF"
+
+    r = requests.patch(f"{url}?updateMask=features", headers=headers(project),
+                       json={"features": features}, timeout=60)
+    if r.status_code >= 400:
+        print(f"HTTP {r.status_code}: {r.text}", file=sys.stderr)
+        r.raise_for_status()
+    print(f"Enabled: {', '.join(stale)}")
+
+
 def check_agent(project, engine, agent_id):
     """Fail loudly on an agent id this assistant does not have.
 
@@ -239,6 +274,8 @@ def main():
     p.add_argument("--session", help="existing session resource name, for multi-turn")
     p.add_argument("--show-tools", action="store_true", help="also print tool call/result chunks")
     p.add_argument("--raw", action="store_true", help="dump the full :streamAssist response to stderr")
+    p.add_argument("--enable-orchestration", action="store_true",
+                   help="clear disable-*-agent-orchestration on the app so agents can be routed to")
     p.add_argument("--no-check-agent", action="store_true",
                    help="skip verifying --agent against the assistant's agent list")
     args = p.parse_args()
@@ -258,6 +295,8 @@ def main():
         list_agents(project, args.engine)
     elif args.describe:
         describe(project, args.engine, args.agent)
+    elif args.enable_orchestration:
+        enable_orchestration(project, args.engine)
     elif args.query:
         if args.agent and not args.no_check_agent:
             check_agent(project, args.engine, args.agent)
